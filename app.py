@@ -116,13 +116,16 @@ html, body, [class*="css"] { font-family: 'Plus Jakarta Sans', sans-serif; }
 .badge-green { background: #dcfce7; color: #15803d; }
 .rekap-wrap { width: 100%; overflow-x: auto; margin-bottom: 18px; border: 1px solid #93c5fd; border-radius: 8px; }
 .rekap-table { width: 100%; border-collapse: collapse; background: #fff; }
-.rekap-table th { background: #bfdbfe !important; color: #000 !important; font-weight: 700; font-size: 12px;
-  text-align: center; padding: 8px 10px; border: 1px solid #93c5fd; white-space: nowrap; }
-.rekap-table td { font-size: 12px; padding: 7px 10px; border: 1px solid #e2e8f0; color: #1e293b;
+.rekap-table th { background: #bfdbfe !important; color: #000 !important; font-weight: 700; font-size: 15px;
+  text-align: center; padding: 10px 12px; border: 1px solid #93c5fd; white-space: nowrap; }
+.rekap-table td { font-size: 15px; padding: 9px 12px; border: 1px solid #e2e8f0; color: #1e293b;
   background: #fff; white-space: nowrap; }
 .rekap-table td.l { text-align: left; } .rekap-table td.c { text-align: center; } .rekap-table td.r { text-align: right; }
 .rekap-table tr.rekap-footer td { background: #bfdbfe !important; color: #000 !important; font-weight: 700;
   border: 1px solid #93c5fd; }
+.rp { display: flex; justify-content: space-between; gap: 12px; }
+.upload-box-empty .badge-red, .upload-box-empty .badge-green,
+.upload-box-filled .badge-green { margin: 2px 4px 2px 0; }
 .cashin-table { width: 100%; border-collapse: collapse; margin-bottom: 25px; background: #fff; border: 1px solid #cbd5e1; }
 .cashin-table th { background: #334155; color: #fff; padding: 8px 10px; font-size: 12px; text-align: center;
   border: 1px solid #475569; font-weight: 700; }
@@ -189,7 +192,7 @@ def tampil_df(df):
     badan = ""
     for i in range(n):
         sel = "".join(
-            f'<td class="{kelas(c)}">{"" if pd.isna(v) else html.escape(str(v))}</td>'
+            f'<td class="{kelas(c)}">{"" if pd.isna(v) else sel_rp(v)}</td>'
             for c, v in zip(df.columns, df.iloc[i].tolist()))
         badan += f'<tr class="rekap-footer">{sel}</tr>' if (ada_footer and i == n - 1) else f"<tr>{sel}</tr>"
     st.markdown(
@@ -199,7 +202,7 @@ def tampil_df(df):
     )
 
 
-VERSI_APP = "v6 · 6 Okt 2026"
+VERSI_APP = "v7 · 6 Okt 2026"
 perlu_rerun = []         # diisi bila ada slot upload yang berubah pada run ini
 
 
@@ -215,8 +218,15 @@ class Berkas:
         return self._isi
 
 
+PETA = {}                # {kunci slot per-ULP: Berkas} hasil pemetaan upload grup
+PERLU_MANUAL = {}        # {jenis: [Berkas yang ULP-nya tidak terdeteksi otomatis]}
+PILIH_KOSONG = "— pilih ULP —"
+
+
 def file_di(key):
     """Berkas pada slot `key` (None bila kosong). Aman dipanggil sebelum widget dirender."""
+    if key in PETA:
+        return PETA[key]
     return st.session_state.get("_berkas_" + key)
 
 
@@ -246,6 +256,47 @@ def custom_file_uploader(label, key, allowed_types=("xls", "xlsx")):
         st.session_state["_berkas_" + key] = Berkas(baru) if baru is not None else None
         perlu_rerun.append(key)
     return baru
+
+
+def uploader_grup(label, jenis, allowed_types=("xls", "xlsx")):
+    """
+    Satu slot untuk kelima file ULP sekaligus (pilih/seret 5 file). Tiap file dipetakan
+    otomatis ke ULP-nya; status per ULP tampil sebagai badge merah/hijau.
+    """
+    daftar = st.session_state.get("_berkas_grp_" + jenis) or []
+    badge, terisi = "", 0
+    for u in TARGET_ULP:
+        bk = PETA.get(k(jenis, u))
+        if bk is not None:
+            terisi += 1
+            badge += f'<span class="badge-green">✅ {u["nama"]}: {html.escape(bk.name)}</span> '
+        else:
+            badge += f'<span class="badge-red">⚠️ {u["nama"]}: Belum Diupload</span> '
+    kelas = "upload-box-filled" if terisi == len(TARGET_ULP) else "upload-box-empty"
+    st.markdown(
+        f'<div class="{kelas}"><div class="upload-title">{html.escape(label)} — {terisi}/{len(TARGET_ULP)} ULP</div>'
+        f"{badge}</div>",
+        unsafe_allow_html=True,
+    )
+    baru = st.file_uploader(label, type=list(allowed_types), key="grp_" + jenis,
+                            accept_multiple_files=True, label_visibility="collapsed") or []
+    tanda_baru = [(f.name, f.size, getattr(f, "file_id", None)) for f in baru]
+    if tanda_baru != [b.tanda for b in daftar]:
+        st.session_state["_berkas_grp_" + jenis] = [Berkas(f) for f in baru]
+        perlu_rerun.append(jenis)
+    # File yang ULP-nya tidak dikenali dari nama/isi: pengguna memilih sendiri
+    for bk in PERLU_MANUAL.get(jenis, []):
+        st.selectbox(f"ULP untuk file “{bk.name}”", [PILIH_KOSONG] + [u["nama"] for u in TARGET_ULP],
+                     key=f"pilih_{jenis}_{bk.name}")
+    return baru
+
+
+def sel_rp(teks):
+    """'Rp 1.234' -> 'Rp' rata kiri dan angka rata kanan dalam satu sel (gaya akuntansi)."""
+    m = re.match(r"^(-?)Rp\s+(.*)$", str(teks))
+    if not m:
+        return html.escape(str(teks))
+    return f'<div class="rp"><span>Rp</span><span>{m.group(1)}{html.escape(m.group(2))}</span></div>'
 
 
 def angka(v):
@@ -529,6 +580,32 @@ def parse_ts_prabayar(b):
     raise ValueError("Header 'UNIT UP' dan 'RP TAG' tidak ditemukan.")
 
 
+ALIAS_ULP = {
+    "12801": ["MEDANTIMUR", "MDNTIMUR", "TIMUR"],
+    "12802": ["BELAWAN"],
+    "12803": ["HELVETIA", "HELVET"],
+    "12804": ["LABUHAN"],
+    "12805": ["DENAI"],
+}
+
+
+@st.cache_data(show_spinner=False)
+def deteksi_ulp(nama, b):
+    """ID ULP pemilik file: dari nama file (nama/kode unit), bila gagal dari isi 25 baris pertama."""
+    rapat = re.sub(r"[^A-Z0-9]", "", nama.upper())
+    cocok = [uid for uid, alias in ALIAS_ULP.items() if uid in rapat or any(a in rapat for a in alias)]
+    if len(cocok) == 1:
+        return cocok[0]
+    try:
+        df = pd.read_excel(io.BytesIO(b), header=None, nrows=25)
+    except Exception:  # noqa: BLE001
+        return None
+    teks = " ".join(str(x).upper() for x in df.to_numpy().ravel() if pd.notna(x))
+    cocok = [u["id"] for u in TARGET_ULP
+             if u["nama"] in teks or re.search(rf"(?<!\d){u['id']}", teks)]
+    return cocok[0] if len(cocok) == 1 else None
+
+
 # =========================================================================
 # 4. PRE-COMPUTATION (dijalankan sebelum sidebar & tab dirender)
 # =========================================================================
@@ -546,6 +623,27 @@ def aman(tab, key, fungsi, default):
         peringatan.append((tab, f"**{file_di(key).name}** gagal dibaca: {e}"))
         return default
 
+
+# --- 4.0 Petakan upload grup (5 file sekaligus) ke slot per-ULP
+NAMA_KE_ID = {u["nama"]: u["id"] for u in TARGET_ULP}
+for jenis in JENIS_PER_ULP:
+    tab_asal = 4 if jenis in ("pal", "ts") else 5
+    hasil_peta, PERLU_MANUAL[jenis] = {}, []
+    for bk in st.session_state.get("_berkas_grp_" + jenis) or []:
+        uid = deteksi_ulp(bk.name, bk.getvalue())
+        if uid is None:
+            PERLU_MANUAL[jenis].append(bk)
+            uid = NAMA_KE_ID.get(st.session_state.get(f"pilih_{jenis}_{bk.name}"))
+            if uid is None:
+                peringatan.append((tab_asal, f"ULP untuk file **{bk.name}** tidak dikenali dari nama maupun "
+                                             "isinya. Pilih ULP-nya pada kotak pilihan di bawah slot upload."))
+                continue
+        if uid in hasil_peta:
+            peringatan.append((tab_asal, f"**{bk.name}** dan **{hasil_peta[uid].name}** sama-sama terbaca sebagai "
+                                         f"ULP {uid}; yang dipakai **{bk.name}**."))
+        hasil_peta[uid] = bk
+    for u in TARGET_ULP:
+        PETA[k(jenis, u)] = hasil_peta.get(u["id"])
 
 # --- 4a. Tab 1: Data Closing
 closing = {"rupiah": None, "kali": None, "bulan": None}
@@ -765,10 +863,10 @@ with tab2:
             + td(fmt_persen(e["cap_prr"] * 100)) + td(fmt_desimal(e["real_prr"]))
             + f'<td rowspan="5" class="cashin-rank">{e["rank"]}</td></tr>'
             + "<tr>" + td("Saldo Rata-rata Pascabayar Non Kogol 1", "") + td("2", "c")
-            + td(fmt_angka(e["t_saldo"])) + td(fmt_angka(e["r_saldo"]))
+            + td(sel_rp(fmt_angka(e["t_saldo"]))) + td(sel_rp(fmt_angka(e["r_saldo"])))
             + td(fmt_persen(e["cap_saldo"] * 100)) + td(fmt_desimal(e["real_saldo"])) + "</tr>"
             + "<tr>" + td("Pelunasan PRR, Eks PRR, dan TS Prabayar", "") + td("2", "c")
-            + td(fmt_angka(e["t_pel"])) + td(fmt_angka(e["r_pel"]))
+            + td(sel_rp(fmt_angka(e["t_pel"]))) + td(sel_rp(fmt_angka(e["r_pel"])))
             + td(fmt_persen(e["cap_pel"] * 100)) + td(fmt_desimal(e["real_pel"])) + "</tr>"
             + '<tr class="cashin-total-row">' + td("TOTAL", "c") + td("6", "c") + '<td colspan="3"></td>'
             + f'<td class="r" style="color:#0284c7;">{fmt_desimal(e["tot_real"], 3)}</td></tr>'
@@ -850,17 +948,16 @@ with tab3:
 # ------------------------------------------------------------------ TAB 4
 with tab4:
     st.markdown(f"### 📂 Upload File PAL & TS — {PERIODE} (10 File)")
-    st.caption("Satu file per ULP. Sistem mengambil Baris 119 (*Rekening Berjalan*) dan Baris 120 "
+    st.caption("Pilih atau seret **kelima file ULP sekaligus** ke tiap slot; sistem mengenali ULP dari nama "
+               "file (nama/kode unit) atau isinya. Sistem mengambil Baris 119 (*Rekening Berjalan*) dan Baris 120 "
                "(*Rekening Tunggakan*) untuk kolom Umum, Pemda, dan BUMN.")
     kiri, kanan = st.columns(2)
     with kiri:
-        st.markdown("##### 📁 File PAL")
-        for u in TARGET_ULP:
-            custom_file_uploader(f"PAL - {u['nama']}", k("pal", u))
+        st.markdown("##### 📁 File PAL (5 ULP)")
+        uploader_grup("File PAL", "pal")
     with kanan:
-        st.markdown("##### 📁 File TS (Tagihan Susulan)")
-        for u in TARGET_ULP:
-            custom_file_uploader(f"TS - {u['nama']}", k("ts", u))
+        st.markdown("##### 📁 File TS / Tagihan Susulan (5 ULP)")
+        uploader_grup("File TS", "ts")
     tampil_peringatan(4)
 
     with st.expander(f"📌 TABEL TARGET RESMI (PAL, TS & RATA-RATA TUNGGAKAN {TAHUN})"):
@@ -899,7 +996,7 @@ with tab4:
 # ------------------------------------------------------------------ TAB 5
 with tab5:
     st.markdown(f"### 💳 PELUNASAN TUNGGAKAN — {PERIODE}")
-    st.caption("21 slot upload: 10 file PRR, 10 file Eks PRR, 1 file TS Prabayar.")
+    st.caption("21 file: 10 file PRR, 10 file Eks PRR, 1 file TS Prabayar. Tiap slot ULP menerima 5 file sekaligus.")
     tampil_peringatan(5)
     sub1, sub2, sub3 = st.tabs(["1. PELUNASAN PRR", "2. PELUNASAN EKS PRR", "3. PELUNASAN TS Prabayar"])
 
@@ -914,13 +1011,11 @@ with tab5:
     def dua_kolom_upload(label, jenis_tunai, jenis_cicilan):
         a, b = st.columns(2)
         with a:
-            st.markdown(f"##### 📁 File TUNAI ({label})")
-            for u in TARGET_ULP:
-                custom_file_uploader(f"{label} Tunai - {u['nama']}", k(jenis_tunai, u))
+            st.markdown(f"##### 📁 File TUNAI ({label}, 5 ULP)")
+            uploader_grup(f"{label} Tunai", jenis_tunai)
         with b:
-            st.markdown(f"##### 📁 File CICILAN ({label})")
-            for u in TARGET_ULP:
-                custom_file_uploader(f"{label} Cicilan - {u['nama']}", k(jenis_cicilan, u))
+            st.markdown(f"##### 📁 File CICILAN ({label}, 5 ULP)")
+            uploader_grup(f"{label} Cicilan", jenis_cicilan)
 
     with sub1:
         st.markdown("#### 📂 Upload Data PELUNASAN PRR (10 File)")
