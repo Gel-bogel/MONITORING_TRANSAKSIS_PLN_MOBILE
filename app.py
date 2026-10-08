@@ -202,7 +202,7 @@ def tampil_df(df):
     )
 
 
-VERSI_APP = "v7 · 6 Okt 2026"
+VERSI_APP = "v9 · 8 Okt 2026"
 perlu_rerun = []         # diisi bila ada slot upload yang berubah pada run ini
 
 
@@ -429,7 +429,7 @@ def parse_kinerja(b):
       kolom_pel  : {bulan: huruf kolom Excel yang dipakai}
       catatan    : daftar peringatan
     """
-    hasil = {"historis": {}, "target_pel": {}, "kolom_pel": {}, "catatan": []}
+    hasil = {"historis": {}, "target_pel": {}, "kolom_pel": {}, "real_pel": {}, "catatan": []}
     xl = pd.ExcelFile(io.BytesIO(b))
     nama_sheet = {s.strip().upper(): s for s in xl.sheet_names}
 
@@ -499,6 +499,24 @@ def parse_kinerja(b):
         }
     if not hasil["target_pel"]:
         hasil["catatan"].append("Kolom berlabel 'T' tidak ditemukan pada sheet 'PELUNASAN PRR' (B:BB).")
+    # --- Realisasi pelunasan bulanan: kolom BD..BQ, header bulan di baris atas,
+    #     nilai pada baris 'TOTAL PELUNASAN' tiap ULP (baris 10/14/18/22/26)
+    kol_real = {}
+    for r in range(n_header):
+        peta = {}
+        for c in range(55, min(69, df.shape[1])):            # BD..BQ
+            m = bulan_dari_label(df.iat[r, c])
+            if m and m not in peta:
+                peta[m] = c
+        if len(peta) > len(kol_real):
+            kol_real = peta
+    for m, c in kol_real.items():
+        hasil["real_pel"][m] = {
+            uid: (angka(df.iat[brs - 1, c]) if brs - 1 < len(df) else 0.0)
+            for uid, brs in BARIS_TARGET_PELUNASAN.items()
+        }
+    if not kol_real:
+        hasil["catatan"].append("Realisasi pelunasan bulanan (kolom BD:BQ sheet 'PELUNASAN PRR') tidak ditemukan.")
     return hasil
 
 
@@ -756,8 +774,12 @@ def pct_realisasi(pct_capaian):
     return 1.10 * BOBOT if pct_capaian >= 1.10 else BOBOT * pct_capaian
 
 
+TARGET_HAPUS_PRR = 100.0
+REAL_HAPUS_PRR = 109.86      # realisasi Penghapusan PRR (nilai tetap)
+
+
 def evaluasi(nama, t_saldo, r_saldo, t_pel, r_pel):
-    cap_prr = 1.0                                                           # Target 100, Realisasi 100
+    cap_prr = REAL_HAPUS_PRR / TARGET_HAPUS_PRR
     cap_saldo = 2.0 - (r_saldo / t_saldo) if (r_saldo > 0 and t_saldo > 0) else 1.0
     cap_pel = (r_pel / t_pel) if t_pel > 0 else 1.0
     real = [pct_realisasi(c) for c in (cap_prr, cap_saldo, cap_pel)]
@@ -771,8 +793,20 @@ def evaluasi(nama, t_saldo, r_saldo, t_pel, r_pel):
 
 rata = {u["id"]: rata_rata_saldo(u["id"]) for u in TARGET_ULP}
 
+# Realisasi pelunasan = akumulasi Januari s.d. bulan laporan.
+#   bulan sebelumnya : TOTAL PELUNASAN di file master (sheet PELUNASAN PRR, kolom BD:BQ)
+#   bulan laporan    : file Tab 5 bila ULP tsb sudah punya file; bila belum, nilai file master
+real_master = (kinerja or {}).get("real_pel", {})
+ada_ts_prabayar = file_di(K_TS_PRABAYAR) is not None
+for u in TARGET_ULP:
+    p = pelunasan[u["id"]]
+    p["lalu"] = sum(real_master.get(m, {}).get(u["id"], 0.0) for m in range(1, BLN))
+    p["dari_upload"] = ada_ts_prabayar or any(file_di(k(j, u)) is not None for j in JENIS_PER_ULP[2:])
+    p["berjalan"] = p["total"] if p["dari_upload"] else real_master.get(BLN, {}).get(u["id"], 0.0)
+    p["akumulasi"] = p["lalu"] + p["berjalan"]
+
 cash_in = [
-    evaluasi(u["nama"], u["t_total"], rata[u["id"]], target_pel.get(u["id"], 0.0), pelunasan[u["id"]]["total"])
+    evaluasi(u["nama"], u["t_total"], rata[u["id"]], target_pel.get(u["id"], 0.0), pelunasan[u["id"]]["akumulasi"])
     for u in TARGET_ULP
 ]
 for peringkat, e in enumerate(sorted(cash_in, key=lambda e: e["pencapaian"], reverse=True), start=1):
@@ -780,7 +814,7 @@ for peringkat, e in enumerate(sorted(cash_in, key=lambda e: e["pencapaian"], rev
 cash_in.append(evaluasi(
     "MEDAN UTARA",
     sum(u["t_total"] for u in TARGET_ULP), sum(rata.values()),
-    sum(target_pel.values()), sum(p["total"] for p in pelunasan.values()),
+    sum(target_pel.values()), sum(p["akumulasi"] for p in pelunasan.values()),
 ))
 
 
@@ -859,7 +893,7 @@ with tab2:
     for e in cash_in:
         baris_html += (
             f'<tr><td rowspan="5" class="cashin-unit">{e["nama"]}</td>'
-            + td("Penghapusan PRR", "") + td("2", "c") + td("100") + td("100")
+            + td("Penghapusan PRR", "") + td("2", "c") + td(fmt_desimal(TARGET_HAPUS_PRR, 0)) + td(fmt_desimal(REAL_HAPUS_PRR))
             + td(fmt_persen(e["cap_prr"] * 100)) + td(fmt_desimal(e["real_prr"]))
             + f'<td rowspan="5" class="cashin-rank">{e["rank"]}</td></tr>'
             + "<tr>" + td("Saldo Rata-rata Pascabayar Non Kogol 1", "") + td("2", "c")
@@ -931,19 +965,22 @@ with tab3:
 
     st.markdown("---")
     st.markdown("### 📋 TABEL TARGET USULAN PENGHAPUSAN PRR")
-    st.caption("Format mengikuti sheet `USULAN PENGHAPUSAN PRR`. Realisasi masih placeholder 100%.")
-    usulan = [("12801", "Medan Timur", "30%", 972_000_000), ("12802", "Belawan", "16%", 485_000_000),
-              ("12803", "Helvetia", "10%", 387_000_000), ("12804", "Labuhan", "14%", 415_000_000),
-              ("12805", "Denai", "30%", 905_000_000)]
-    df_usulan = pd.DataFrame(
-        [{"No": str(i), "Kode Unit": kd, "Nama Unit": nm, "Proporsional": pr, f"Target {TAHUN}": tg,
-          "Realisasi Plgn": 100, "Realisasi Rupiah": tg, "GAP": 0, "% Pencapaian": 100.0}
-         for i, (kd, nm, pr, tg) in enumerate(usulan, start=1)]
-        + [{"No": "", "Kode Unit": ID_UP3, "Nama Unit": NAMA_UP3, "Proporsional": "100%",
-            f"Target {TAHUN}": sum(x[3] for x in usulan), "Realisasi Plgn": 500,
-            "Realisasi Rupiah": sum(x[3] for x in usulan), "GAP": 0, "% Pencapaian": 100.0}]
-    )
-    tampil_df(format_tabel(df_usulan, [f"Target {TAHUN}", "Realisasi Rupiah", "GAP"], ["% Pencapaian"]))
+    st.caption(f"Target persentase {fmt_desimal(TARGET_HAPUS_PRR, 0)}% dan realisasi {fmt_desimal(REAL_HAPUS_PRR)} "
+               "berlaku untuk semua unit (nilai tetap, sama dengan baris Penghapusan PRR di Tab 2).")
+    usulan = [("12801", "Medan Timur", 972_000_000), ("12802", "Belawan", 485_000_000),
+              ("12803", "Helvetia", 387_000_000), ("12804", "Labuhan", 415_000_000),
+              ("12805", "Denai", 905_000_000)]
+    usulan_semua = [(str(i), kd, nm, tg) for i, (kd, nm, tg) in enumerate(usulan, start=1)] \
+        + [("", ID_UP3, NAMA_UP3, sum(x[2] for x in usulan))]
+    df_usulan = pd.DataFrame([{
+        "No": no, "Kode Unit": kd, "Nama Unit": nm,
+        f"Target Rupiah {TAHUN}": tg,
+        "Target Persentase (%)": fmt_persen(TARGET_HAPUS_PRR),
+        "Realisasi Rupiah": tg * REAL_HAPUS_PRR / TARGET_HAPUS_PRR,
+        "Realisasi Plgn": fmt_desimal(REAL_HAPUS_PRR),
+        "% Pencapaian": REAL_HAPUS_PRR / TARGET_HAPUS_PRR * 100,
+    } for no, kd, nm, tg in usulan_semua])
+    tampil_df(format_tabel(df_usulan, [f"Target Rupiah {TAHUN}", "Realisasi Rupiah"], ["% Pencapaian"]))
 
 # ------------------------------------------------------------------ TAB 4
 with tab4:
@@ -1044,6 +1081,14 @@ with tab5:
     st.markdown("#### 📊 Ringkasan Total Pelunasan")
     rekap({"Pelunasan PRR (Rp)": "prr", "Pelunasan Eks PRR (Rp)": "eks",
            "Pelunasan TS Prabayar (Rp)": "ts", "TOTAL PELUNASAN (Rp)": "total"})
+
+    st.markdown(f"#### 📈 Akumulasi Pelunasan Januari s.d. {nama_bulan} (Realisasi Tab 2)")
+    rekap({"s.d. Bulan Sebelumnya (Rp)": "lalu", f"{nama_bulan} (Rp)": "berjalan", "AKUMULASI (Rp)": "akumulasi"})
+    st.caption("Bulan sebelumnya diambil dari baris `TOTAL PELUNASAN` sheet `PELUNASAN PRR` (kolom BD:BQ) file master. "
+               f"Nilai {nama_bulan} memakai file yang diunggah di tab ini; untuk ULP yang belum punya file, "
+               "dipakai nilai bulan tersebut dari file master.")
+    if kinerja is None:
+        st.warning("File Master Kinerja belum diunggah, jadi nilai bulan-bulan sebelumnya belum ikut terhitung.")
 
 # Ada slot upload yang berubah pada run ini -> jalankan ulang supaya pre-computation memakainya.
 if perlu_rerun:
